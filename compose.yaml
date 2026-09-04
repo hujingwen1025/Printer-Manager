@@ -1,0 +1,41 @@
+services:
+  printer-manager:
+    container_name: PrinterManager
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: printer-manager:latest
+    restart: unless-stopped
+    environment:
+      PM_PORT: "8080"
+      PM_ALLOWED_HOSTS: ${PM_ALLOWED_HOSTS:-192.168.10.167,printer-manager.local,localhost,127.0.0.1}
+      PM_CSRF_TRUSTED_ORIGINS: ${PM_CSRF_TRUSTED_ORIGINS:-}
+      PM_ADMIN_USERNAME: ${PM_ADMIN_USERNAME:-admin}
+      PM_ADMIN_PASSWORD: ${PM_ADMIN_PASSWORD:?Set PM_ADMIN_PASSWORD in Dockhand}
+      PM_SECRET_KEY: ${PM_SECRET_KEY:?Set PM_SECRET_KEY in Dockhand}
+      PM_HTTPS: ${PM_HTTPS:-0}
+      PM_TRUST_PROXY: ${PM_TRUST_PROXY:-0}
+      PM_SSL_REDIRECT: ${PM_SSL_REDIRECT:-0}
+    volumes:
+      - /opt/docker/printer_manager_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: ${PM_MEMORY_LIMIT:-2G}
+    networks:
+      lan_network:
+        ipv4_address: 192.168.10.167
+
+networks:
+  lan_network:
+    name: "LAN IPVSwitch"
+    external: true

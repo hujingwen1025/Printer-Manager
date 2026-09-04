@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Discovery · Printer Manager{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Explicit network action</p><h1>Discover devices</h1><p>Discovery runs only when you start it. Results are reviewed before anything is added.</p></div></div>
+<div class="split discovery-layout"><section class="panel"><h2>New discovery session</h2><form method="post" class="stacked-form">{% csrf_token %}{{ form.as_p }}<div class="notice">LAN scans accept private IPv4 ranges only and are limited to 256 addresses. Only printing and scanning endpoints are probed.</div><button class="button primary" type="submit">Start discovery</button></form></section><section class="panel"><h2>Recent sessions</h2><div class="list">{% for run in runs %}<a href="{% url 'discovery_detail' run.pk %}"><span><strong>{{ run.get_kind_display }}</strong><small>{{ run.cidr|default:"Multicast session" }} · {{ run.created_at }}</small></span><span class="status {{ run.state }}"><i></i>{{ run.get_state_display }}</span></a>{% empty %}<p class="muted">No discovery sessions yet.</p>{% endfor %}</div></section></div>
+{% endblock %}

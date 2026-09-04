@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Printer Manager{% endblock %}
+{% block content %}
+<section class="login-card">
+  <div class="brand-mark brand-mark-large">PM</div>
+  <p class="eyebrow">Secure device operations</p>
+  <h1>Welcome back</h1>
+  <p class="muted">Sign in to manage printers, scans, and jobs on this network.</p>
+  <form method="post" class="stacked-form">{% csrf_token %}{{ form.as_p }}{% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}<button class="button primary wide" type="submit">Sign in</button></form>
+</section>
+{% endblock %}

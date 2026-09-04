@@ -1,0 +1,8 @@
+.env
+.data/
+.venv/
+secrets/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+htmlcov/

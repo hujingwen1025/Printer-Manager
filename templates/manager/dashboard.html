@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Overview</p><h1>Dashboard</h1><p>See what is ready, what is running, and what needs attention.</p></div>{% if pm_role == 'admin' %}<a class="button primary" href="{% url 'discovery' %}">Discover devices</a>{% endif %}</div>
+<section class="stats">
+  <div class="stat"><strong>{{ devices|length }}</strong><span>Configured devices</span></div>
+  <div class="stat"><strong>{{ print_jobs|length }}</strong><span>Recent print jobs</span></div>
+  <div class="stat"><strong>{{ scan_jobs|length }}</strong><span>Recent scan jobs</span></div>
+</section>
+<section><div class="section-heading"><h2>Devices</h2><a href="{% url 'device_list' %}">View all</a></div>
+  <div class="card-grid">{% for device in devices %}<a class="device-card" href="{% url 'device_detail' device.pk %}"><div class="device-top"><span class="device-icon">{% if device.printer and device.scanner %}MFP{% elif device.printer %}PR{% else %}SC{% endif %}</span><span class="status {{ device.status }}"><i></i>{{ device.get_status_display }}</span></div><h3>{{ device.name }}</h3><p>{{ device.address }}</p><div class="tags">{% if device.printer %}<span>Printer</span>{% endif %}{% if device.scanner %}<span>Scanner</span>{% endif %}</div></a>{% empty %}<div class="empty-state"><h3>No devices yet</h3><p>An administrator can discover or add the first printer.</p></div>{% endfor %}</div>
+</section>
+<div class="split"><section><div class="section-heading"><h2>Print activity</h2></div>{% include "manager/partials/print_table.html" with compact=True %}</section><section><div class="section-heading"><h2>Scan activity</h2></div>{% include "manager/partials/scan_table.html" with compact=True %}</section></div>
+{% endblock %}

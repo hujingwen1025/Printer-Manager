@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Print · {{ printer.device.name }}{% endblock %}
+{% block content %}<div class="page-heading"><div><p class="eyebrow">Print job</p><h1>Print to {{ printer.device.name }}</h1><p>Upload a PDF, image, or Office document. The source expires after 24 hours.</p></div></div><section class="panel form-panel"><form method="post" enctype="multipart/form-data" class="stacked-form">{% csrf_token %}{{ form.as_p }}<button class="button primary" type="submit">Queue print job</button></form></section>{% endblock %}

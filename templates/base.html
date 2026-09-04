@@ -1,0 +1,41 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{% block title %}{{ pm_site_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'manager/app.css' %}">
+  <link rel="stylesheet" href="{% static 'manager/forms.css' %}">
+  <script defer src="{% static 'manager/app.js' %}"></script>
+</head>
+<body>
+  {% if user.is_authenticated %}
+  <header class="topbar">
+    <a class="brand" href="{% url 'dashboard' %}"><span class="brand-mark">PM</span><span>{{ pm_site_name }}</span></a>
+    <button class="nav-toggle" type="button" aria-label="Toggle navigation" data-nav-toggle>Menu</button>
+    <nav class="nav" data-nav>
+      <a href="{% url 'dashboard' %}">Dashboard</a>
+      <a href="{% url 'device_list' %}">Devices</a>
+      <a href="{% url 'jobs' %}">Jobs</a>
+      {% if pm_role == 'admin' %}
+      <a href="{% url 'discovery' %}">Discovery</a>
+      <a href="{% url 'user_list' %}">Users</a>
+      <a href="{% url 'audit' %}">Audit</a>
+      <a href="{% url 'system_settings' %}">Settings</a>
+      {% endif %}
+    </nav>
+    <div class="account">
+      <a href="{% url 'password_change' %}">{{ user.username }}</a>
+      <form action="{% url 'logout' %}" method="post">{% csrf_token %}<button class="link-button" type="submit">Sign out</button></form>
+    </div>
+  </header>
+  {% endif %}
+  <main class="shell {% if not user.is_authenticated %}auth-shell{% endif %}">
+    {% if messages %}<div class="messages">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% if user.is_authenticated %}<footer>Printer Manager {{ pm_version }} · {{ pm_role|title }} access{% if not pm_https %} · HTTP mode{% endif %}</footer>{% endif %}
+</body>
+</html>

@@ -1,0 +1,2 @@
+{% extends "base.html" %}
+{% block content %}<div class="page-heading"><div><p class="eyebrow">Configuration</p><h1>{{ title }}</h1></div></div><section class="panel form-panel"><form method="post" class="stacked-form">{% csrf_token %}{{ form.as_p }}<div class="button-row"><button class="button primary" type="submit">{{ submit_label }}</button><a class="button" href="javascript:history.back()">Cancel</a></div></form></section>{% endblock %}
