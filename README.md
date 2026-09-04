@@ -239,10 +239,12 @@ Its IPAM subnet must include `192.168.10.167`. Reserve that address outside the 
 Create the persistent application directory:
 
 ```sh
-sudo install -d -m 0750 /opt/docker/printer_manager_data
+sudo install -d -m 0755 /opt/docker/printer_manager_data
 ```
 
 The container starts as root only for CUPS and storage initialization, then runs the web server and job worker as the unprivileged `printermanager` account. Do not add `user:` to the Compose service.
+
+The entrypoint normalizes only the `/data` mount point to mode `0755` so the unprivileged services can traverse it. `/data/app` remains mode `0700`, the SQLite database remains mode `0600`, and the web and worker processes use a restrictive file-creation mask for uploaded documents, scans, and generated configuration.
 
 ### 2. Give Dockhand repository access
 
@@ -346,6 +348,13 @@ After the first verified deployment, automatic Git synchronization can be enable
 - Check the generated list with `docker compose exec printer-manager scanimage -L`.
 - Check detailed capabilities with `docker compose exec printer-manager scanimage -d 'DEVICE_ID' --all-options`.
 - Use the stable manual endpoint when a device's multicast identity changes.
+
+### The container reports `Permission denied: /data/app`
+
+- Synchronize and redeploy the latest stack; the entrypoint now corrects traversal permissions on the `/data` bind mount.
+- Confirm `/opt/docker/printer_manager_data` is a directory rather than a file.
+- On NAS filesystems with ACLs, root squashing, or inherited deny rules, grant directory traversal to container users or use a local Docker volume-backed filesystem.
+- Do not configure a Compose `user:` override because initialization must prepare CUPS and the mounted storage before dropping privileges.
 
 ### Office conversion fails
 
