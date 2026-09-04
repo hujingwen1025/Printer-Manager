@@ -2,6 +2,7 @@ import tempfile
 import zipfile
 import socket
 import ipaddress
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -12,8 +13,10 @@ from django.utils import timezone
 from PIL import Image
 
 from manager.models import Device, PrintJob, PrinterEndpoint, ScanJob, ScannerEndpoint
-from manager.services.discovery import _discover_wsd_scanners, validate_private_cidr, validate_endpoint_uri
+from manager.services.discovery import _discover_wsd_scanners, _wsd_metadata, validate_private_cidr, validate_endpoint_uri
 from manager.services.documents import inspect_document, normalize_for_print
+from manager.services.sane_service import regenerate_config
+from manager.services.scanner_drivers import ScannerDriverError, get_scanner_driver, make_hpaio_uri
 from manager.task_processor import cleanup_expired
 
 
@@ -33,8 +36,8 @@ class DiscoveryValidationTests(TestCase):
         with self.assertRaises(ValueError):
             validate_endpoint_uri("socket://printer.local:9100", "printer")
 
-    def test_wsd_results_are_filtered_to_requested_network(self):
-        payload = b'<ProbeMatches><ProbeMatch><XAddrs>http://192.168.1.40:5357/DeviceService http://10.0.0.4:5357/DeviceService</XAddrs></ProbeMatch></ProbeMatches>'
+    def test_wsd_printer_only_response_is_not_reported_as_scanner(self):
+        payload = b'<ProbeMatches><ProbeMatch><Types>PrintDeviceType</Types><EndpointReference><Address>urn:uuid:printer</Address></EndpointReference><XAddrs>http://192.168.1.40:5357/DeviceService</XAddrs></ProbeMatch></ProbeMatches>'
 
         class FakeSocket:
             calls = 0
@@ -52,8 +55,81 @@ class DiscoveryValidationTests(TestCase):
 
         with patch("manager.services.discovery.socket.socket", return_value=FakeSocket()), patch("manager.services.discovery.socket.gethostbyname", side_effect=resolve):
             results = _discover_wsd_scanners(ipaddress.ip_network("192.168.1.0/24"), timeout=0.01)
+        self.assertEqual(results, [])
+
+    def test_wsd_resolves_only_hosted_scanner_service(self):
+        payload = b'<ProbeMatches><ProbeMatch><Types>ScanDeviceType PrintDeviceType</Types><EndpointReference><Address>urn:uuid:mfp</Address></EndpointReference><XAddrs>http://192.168.1.40:5357/DeviceService</XAddrs></ProbeMatch></ProbeMatches>'
+        metadata = b'''<Metadata><ThisModel><Manufacturer>Example</Manufacturer><ModelName>MFP</ModelName></ThisModel><Relationship><Hosted><Types>ScannerServiceType</Types><EndpointReference><Address>http://192.168.1.40:5358/WSDScanner</Address></EndpointReference></Hosted><Hosted><Types>PrinterServiceType</Types><EndpointReference><Address>http://192.168.1.40:5358/WSDPrinter</Address></EndpointReference></Hosted></Relationship></Metadata>'''
+
+        class FakeSocket:
+            calls = 0
+            def settimeout(self, value): pass
+            def sendto(self, value, target): pass
+            def recvfrom(self, size):
+                self.calls += 1
+                if self.calls == 1:
+                    return payload, ("192.168.1.40", 3702)
+                raise socket.timeout
+            def close(self): pass
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, size): return metadata
+
+        with patch("manager.services.discovery.socket.socket", return_value=FakeSocket()), \
+             patch("manager.services.discovery.socket.gethostbyname", side_effect=lambda host: host), \
+             patch("manager.services.discovery.urllib.request.urlopen", return_value=FakeResponse()):
+            results = _discover_wsd_scanners(ipaddress.ip_network("192.168.1.0/24"), timeout=0.01)
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["address"], "192.168.1.40")
+        self.assertEqual(results[0]["uri"], "http://192.168.1.40:5358/WSDScanner")
+        self.assertEqual(results[0]["protocol"], "airscan-wsd")
+
+    def test_wsd_metadata_rejects_malformed_oversized_and_outside_endpoints(self):
+        class FakeResponse:
+            status = 200
+            def __init__(self, payload): self.payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, size): return self.payload
+
+        network = ipaddress.ip_network("192.168.1.0/24")
+        cases = (
+            b"<not-closed>",
+            b"x" * 262145,
+            b"<Metadata><Hosted><Types>ScannerServiceType</Types><Address>http://10.0.0.8/WSDScanner</Address></Hosted></Metadata>",
+        )
+        for payload in cases:
+            with self.subTest(size=len(payload)), patch(
+                "manager.services.discovery.urllib.request.urlopen", return_value=FakeResponse(payload)
+            ):
+                self.assertEqual(_wsd_metadata("http://192.168.1.40/device", "urn:uuid:mfp", network, 0.01), [])
+
+    def test_hpaio_uri_is_generated_without_a_shell(self):
+        completed = subprocess.CompletedProcess(["hp-makeuri"], 0, "hpaio:/net/HP_MFP?ip=192.168.1.40\n", "")
+        with patch("manager.services.scanner_drivers.subprocess.run", return_value=completed) as run:
+            self.assertEqual(make_hpaio_uri("192.168.1.40"), "hpaio:/net/HP_MFP?ip=192.168.1.40")
+        self.assertEqual(run.call_args.args[0], ["hp-makeuri", "-s", "192.168.1.40"])
+
+    def test_hpaio_rejects_public_endpoint(self):
+        with patch("manager.services.scanner_drivers.socket.gethostbyname", return_value="8.8.8.8"):
+            with self.assertRaises(ScannerDriverError):
+                get_scanner_driver("hpaio").normalize_endpoint("hpaio:/net/HP?ip=8.8.8.8")
+
+    def test_hpaio_reports_missing_driver_tool(self):
+        with patch("manager.services.scanner_drivers.subprocess.run", side_effect=FileNotFoundError):
+            with self.assertRaisesMessage(ScannerDriverError, "not installed"):
+                make_hpaio_uri("192.168.1.40")
+
+    def test_sane_configuration_enables_only_vetted_backends(self):
+        device = Device.objects.create(name="Configured scanner", address="192.168.1.40")
+        ScannerEndpoint.objects.create(device=device, uri="http://192.168.1.40/eSCL", protocol="airscan-escl")
+        with tempfile.TemporaryDirectory() as directory, override_settings(DATA_DIR=Path(directory)):
+            regenerate_config()
+            self.assertIn("airscan\nhpaio\n", (Path(directory) / "sane" / "dll.conf").read_text())
+            airscan = (Path(directory) / "sane" / "airscan.conf").read_text()
+            self.assertIn("http://192.168.1.40/eSCL, escl", airscan)
 
 
 class DocumentTests(TestCase):

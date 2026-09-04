@@ -14,7 +14,7 @@ from django.urls import reverse
 from manager.audit import record
 from manager.models import AppSetting, AuditEvent, Device, DiscoveryRun, PrinterEndpoint, PrintJob, ScanJob, ScannerEndpoint, Task
 from manager.services.sane_service import ScanFailure
-from manager.task_processor import handle_print, handle_scan
+from manager.task_processor import handle_configure_scanner, handle_print, handle_scan
 from manager.security import ROLES
 
 
@@ -35,7 +35,10 @@ class BaseCase(TestCase):
         cls.viewer.groups.add(cls.groups["viewer"])
         cls.device = Device.objects.create(name="Office MFP", address="192.168.1.20")
         cls.printer = PrinterEndpoint.objects.create(device=cls.device, uri="ipp://192.168.1.20/ipp/print", queue_name="office-mfp")
-        cls.scanner = ScannerEndpoint.objects.create(device=cls.device, uri="http://192.168.1.20/eSCL", protocol="escl")
+        cls.scanner = ScannerEndpoint.objects.create(
+            device=cls.device, uri="http://192.168.1.20/eSCL", protocol="airscan-escl",
+            validation_state=ScannerEndpoint.ValidationState.READY,
+        )
 
 
 class AuthenticationTests(BaseCase):
@@ -87,6 +90,44 @@ class AuthenticationTests(BaseCase):
 class DiscoveryTests(BaseCase):
     def test_discovery_is_explicit_and_enqueued(self):
         self.assertEqual(DiscoveryRun.objects.count(), 0)
+
+    def test_scanner_driver_change_clears_stale_validation_data(self):
+        self.scanner.capabilities = {"sources": ["Old source"]}
+        self.scanner.sane_name = "airscan:e0:Old"
+        self.scanner.save(update_fields=["capabilities", "sane_name"])
+        self.client.force_login(self.admin)
+        response = self.client.post(reverse("device_edit", args=[self.device.pk]), {
+            "name": self.device.name, "address": self.device.address, "location": "", "notes": "",
+            "enabled": "on", "printer_uri": self.printer.uri, "queue_name": self.printer.queue_name,
+            "scanner_uri": "http://192.168.1.20/WSDScanner", "scanner_protocol": "airscan-wsd",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.scanner.refresh_from_db()
+        self.assertEqual(self.scanner.protocol, "airscan-wsd")
+        self.assertEqual(self.scanner.validation_state, ScannerEndpoint.ValidationState.PENDING)
+        self.assertEqual(self.scanner.capabilities, {})
+        self.assertEqual(self.scanner.sane_name, "")
+        event = AuditEvent.objects.get(action="scanner.driver_changed")
+        self.assertEqual(event.detail["event"]["previous_driver"], "airscan-escl")
+        self.assertEqual(event.detail["event"]["new_driver"], "airscan-wsd")
+
+    @patch("manager.services.scanner_drivers.make_hpaio_uri", return_value="hpaio:/net/M177?ip=192.168.1.21")
+    def test_hpaio_identifier_is_regenerated_when_device_address_changes(self, make_uri):
+        self.scanner.protocol = ScannerEndpoint.Protocol.HPAIO
+        self.scanner.uri = "hpaio:/net/M177?ip=192.168.1.20"
+        self.scanner.save(update_fields=["protocol", "uri"])
+        self.client.force_login(self.admin)
+        response = self.client.post(reverse("device_edit", args=[self.device.pk]), {
+            "name": self.device.name, "address": "192.168.1.21", "location": "", "notes": "",
+            "enabled": "on", "printer_uri": self.printer.uri, "queue_name": self.printer.queue_name,
+            "scanner_uri": self.scanner.uri, "scanner_protocol": "hpaio",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.scanner.refresh_from_db()
+        self.assertEqual(self.scanner.uri, "hpaio:/net/M177?ip=192.168.1.21")
+        make_uri.assert_called_once_with("192.168.1.21")
+
+    def test_discovery_request_creates_pending_worker_task(self):
         self.client.force_login(self.admin)
         response = self.client.post(reverse("discovery"), {"kind": "mdns", "cidr": ""})
         self.assertEqual(response.status_code, 302)
@@ -128,6 +169,26 @@ class JobTests(BaseCase):
             self.client.force_login(self.admin)
             response = self.client.get(reverse("scan_download", args=[job.pk]))
             self.assertEqual(response.status_code, 200)
+
+    def test_scan_submission_is_blocked_until_scanner_is_ready(self):
+        self.scanner.validation_state = ScannerEndpoint.ValidationState.FAILED
+        self.scanner.validation_message = "Driver could not open the device"
+        self.scanner.save(update_fields=["validation_state", "validation_message"])
+        self.client.force_login(self.operator)
+        response = self.client.post(reverse("scan_submit", args=[self.scanner.pk]), {
+            "source": "Flatbed", "mode": "Color", "resolution": "300", "output_format": "pdf",
+        })
+        self.assertRedirects(response, reverse("device_detail", args=[self.device.pk]))
+        self.assertFalse(ScanJob.objects.exists())
+
+    def test_admin_can_queue_scanner_revalidation(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(reverse("scanner_revalidate", args=[self.scanner.pk]))
+        self.assertRedirects(response, reverse("device_detail", args=[self.device.pk]))
+        self.scanner.refresh_from_db()
+        self.assertEqual(self.scanner.validation_state, ScannerEndpoint.ValidationState.PENDING)
+        self.assertTrue(Task.objects.filter(kind="configure_scanner", payload__scanner_id=self.scanner.pk).exists())
+        self.assertTrue(AuditEvent.objects.filter(action="scanner.revalidation_requested").exists())
 
     def test_scan_owner_can_rename_and_preview_result(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -252,3 +313,27 @@ class AuditDetailTests(BaseCase):
         event = AuditEvent.objects.get(action="scan.failed")
         self.assertEqual(event.detail["event"]["diagnostics"]["return_code"], 1)
         self.assertEqual(event.detail["target"]["options"]["resolution"], "300")
+
+    def test_scanner_validation_success_is_persisted_and_audited(self):
+        self.scanner.validation_state = ScannerEndpoint.ValidationState.PENDING
+        self.scanner.save(update_fields=["validation_state"])
+        with patch("manager.task_processor.regenerate_config"), patch(
+            "manager.task_processor.fetch_capabilities", return_value={"sources": ["Flatbed"]}
+        ):
+            handle_configure_scanner(self.scanner.pk)
+        self.scanner.refresh_from_db()
+        self.assertEqual(self.scanner.validation_state, ScannerEndpoint.ValidationState.READY)
+        self.assertIsNotNone(self.scanner.validated_at)
+        self.assertTrue(AuditEvent.objects.filter(action="scanner.validation_succeeded").exists())
+
+    def test_scanner_validation_failure_keeps_diagnostics(self):
+        diagnostics = {"stage": "capabilities", "return_code": 1, "stderr": "plugin missing"}
+        with patch("manager.task_processor.regenerate_config"), patch(
+            "manager.task_processor.fetch_capabilities", side_effect=ScanFailure("Vendor plug-in missing", diagnostics)
+        ):
+            with self.assertRaises(ScanFailure):
+                handle_configure_scanner(self.scanner.pk)
+        self.scanner.refresh_from_db()
+        self.assertEqual(self.scanner.validation_state, ScannerEndpoint.ValidationState.FAILED)
+        event = AuditEvent.objects.get(action="scanner.validation_failed")
+        self.assertEqual(event.detail["event"]["diagnostics"]["stderr"], "plugin missing")

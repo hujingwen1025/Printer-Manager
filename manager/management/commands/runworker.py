@@ -3,7 +3,7 @@ import time
 
 from django.core.management.base import BaseCommand
 
-from manager.task_processor import cleanup_expired, process_one, sync_print_jobs
+from manager.task_processor import cleanup_expired, process_one, reconcile_scanner_validations, sync_print_jobs
 
 
 class Command(BaseCommand):
@@ -18,6 +18,7 @@ class Command(BaseCommand):
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
+        reconcile_scanner_validations()
         last_maintenance = 0
         while running:
             worked = process_one()

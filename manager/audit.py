@@ -32,6 +32,7 @@ def _target_snapshot(target):
         return {}
     snapshot = {"model": target.__class__.__name__, "id": str(target.pk)}
     for field in ("name", "username", "address", "queue_name", "uri", "protocol", "sane_name",
+                  "validation_state", "validation_message", "validated_at",
                   "state", "status", "enabled", "accepting_jobs", "queue_enabled", "cups_job_id",
                   "output_format", "page_count", "size_bytes", "error", "created_at", "completed_at"):
         if hasattr(target, field):
@@ -54,7 +55,9 @@ def _target_snapshot(target):
     scanner = related("scanner")
     if scanner:
         snapshot["scanner"] = {"id": str(scanner.pk), "device": scanner.device.name,
-                               "protocol": scanner.protocol, "uri": scanner.uri, "sane_name": scanner.sane_name}
+                               "driver": scanner.protocol, "uri": scanner.uri, "sane_name": scanner.sane_name,
+                               "validation_state": scanner.validation_state,
+                               "validation_message": scanner.validation_message}
     for field in ("options", "capabilities", "default_options"):
         value = getattr(target, field, None)
         if value:

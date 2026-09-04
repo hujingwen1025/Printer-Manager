@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from .models import AppSetting, Device, PrinterEndpoint, ScannerEndpoint
 from .security import ROLES, ROLE_VIEWER
 from .services.discovery import validate_endpoint_uri, validate_private_cidr
+from .services.scanner_drivers import ScannerDriverError, get_scanner_driver, scanner_driver_choices
 
 
 class LoginForm(AuthenticationForm):
@@ -37,8 +38,9 @@ class DiscoveryForm(forms.Form):
 class DeviceForm(forms.ModelForm):
     printer_uri = forms.CharField(required=False, label="Printer IPP/IPPS URI")
     queue_name = forms.SlugField(required=False, max_length=80)
-    scanner_uri = forms.URLField(required=False, label="Scanner eSCL/WSD URI")
-    scanner_protocol = forms.ChoiceField(required=False, choices=ScannerEndpoint.Protocol.choices)
+    scanner_uri = forms.CharField(required=False, label="Scanner endpoint or address",
+                                  help_text="For HPLIP, enter the scanner IP address; the canonical identifier is generated automatically.")
+    scanner_protocol = forms.ChoiceField(required=False, label="Scanner driver", choices=())
 
     class Meta:
         model = Device
@@ -47,6 +49,7 @@ class DeviceForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["scanner_protocol"].choices = [("", "Select a driver")] + scanner_driver_choices()
         if self.instance and self.instance.pk:
             printer = PrinterEndpoint.objects.filter(device=self.instance).first()
             scanner = ScannerEndpoint.objects.filter(device=self.instance).first()
@@ -80,8 +83,12 @@ class DeviceForm(forms.ModelForm):
                 self.add_error("queue_name", "This queue name is already in use")
         if scanner_uri:
             try:
-                validate_endpoint_uri(scanner_uri, "scanner")
-            except (ValueError, OSError) as exc:
+                driver_id = cleaned.get("scanner_protocol") or ScannerEndpoint.Protocol.AIRSCAN_ESCL
+                if driver_id == ScannerEndpoint.Protocol.HPAIO and "address" in self.changed_data:
+                    scanner_uri = cleaned.get("address", "")
+                scanner_uri = get_scanner_driver(driver_id).normalize_endpoint(scanner_uri, cleaned.get("address", ""))
+                cleaned["scanner_uri"] = scanner_uri
+            except (ScannerDriverError, ValueError, OSError) as exc:
                 self.add_error("scanner_uri", str(exc))
             scanner_matches = ScannerEndpoint.objects.filter(uri=scanner_uri)
             if self.instance.pk:

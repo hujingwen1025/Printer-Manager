@@ -10,6 +10,7 @@ from django.conf import settings
 from PIL import Image
 
 from manager.models import AppSetting, ScannerEndpoint
+from manager.services.scanner_drivers import ScannerDriverError, get_scanner_driver
 
 
 class ScanFailure(RuntimeError):
@@ -33,18 +34,22 @@ def sane_environment():
     config_dir = Path(settings.DATA_DIR) / "sane"
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     dll = config_dir / "dll.conf"
-    if not dll.exists():
-        dll.write_text("airscan\n", encoding="utf-8")
+    dll.write_text("airscan\nhpaio\n", encoding="utf-8")
+    os.chmod(dll, 0o600)
     return {**os.environ, "SANE_CONFIG_DIR": str(config_dir)}
 
 
 def regenerate_config():
     config_dir = Path(settings.DATA_DIR) / "sane"
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dll = config_dir / "dll.conf"
+    dll.write_text("airscan\nhpaio\n", encoding="utf-8")
+    os.chmod(dll, 0o600)
     lines = ["[options]", "discovery = disable", "", "[devices]"]
     for scanner in ScannerEndpoint.objects.select_related("device").order_by("device__name"):
-        safe_name = scanner.device.name.replace('"', "'").replace("\n", " ")
-        lines.append(f'"{safe_name}" = {scanner.uri}, {scanner.protocol}')
+        entry = get_scanner_driver(scanner.protocol).config_entry(scanner)
+        if entry:
+            lines.append(entry)
     path = config_dir / "airscan.conf"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
@@ -64,25 +69,39 @@ def list_scanners():
 
 
 def resolve_scanner(scanner):
-    found_scanners = list_scanners()
-    for found in found_scanners:
-        if scanner.device.name.lower() in found["description"].lower() or scanner.device.name.lower() in found["sane_name"].lower():
-            if scanner.sane_name != found["sane_name"]:
-                scanner.sane_name = found["sane_name"]
-                scanner.save(update_fields=["sane_name"])
-            return found["sane_name"]
-    raise ScanFailure("Scanner is not reachable through SANE", {
-        "stage": "resolve", "configured_device": scanner.device.name,
-        "configured_uri": scanner.uri, "configured_protocol": scanner.protocol,
-        "available_scanners": found_scanners,
-    })
+    driver = get_scanner_driver(scanner.protocol)
+    found_scanners = [] if driver.id == "hpaio" else list_scanners()
+    try:
+        sane_name = driver.resolve(scanner, found_scanners)
+    except ScannerDriverError as exc:
+        raise ScanFailure(str(exc), {
+            "stage": "resolve", "configured_device": scanner.device.name,
+            "configured_uri": scanner.uri, "configured_driver": driver.id,
+            "available_scanners": found_scanners,
+        }) from exc
+    if scanner.sane_name != sane_name:
+        scanner.sane_name = sane_name
+        scanner.save(update_fields=["sane_name"])
+    return sane_name
 
 
 def fetch_capabilities(scanner):
     sane_name = resolve_scanner(scanner)
-    result = subprocess.run(["scanimage", "-d", sane_name, "--all-options"], capture_output=True, text=True, timeout=30, env=sane_environment())
+    command = ["scanimage", "-d", sane_name, "--all-options"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=sane_environment())
+    except subprocess.TimeoutExpired as exc:
+        raise ScanFailure("Scanner capability validation timed out", {
+            "stage": "capabilities", "command": command, "sane_device": sane_name,
+            "configured_driver": scanner.protocol, "timeout_seconds": 30,
+        }) from exc
     if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "Unable to query scanner capabilities")
+        diagnostics = {
+            "stage": "capabilities", "command": command, "sane_device": sane_name,
+            "configured_driver": scanner.protocol, "return_code": result.returncode,
+            "stdout": _clean_output(result.stdout), "stderr": _clean_output(result.stderr),
+        }
+        raise ScanFailure(_friendly_error(result.stderr), diagnostics)
     text = result.stdout
     capabilities = {
         "raw": text[-20000:],
@@ -146,6 +165,7 @@ def run_scan(job):
     pages = sorted(output_dir.glob("page-*.png"))
     diagnostics = {
         "stage": "scanimage", "command": command, "sane_device": scanner_name,
+        "configured_driver": job.scanner.protocol, "configured_endpoint": job.scanner.uri,
         "return_code": process.returncode, "stdout": _clean_output(stdout),
         "stderr": _clean_output(stderr), "pages_received": len(pages),
         "duration_seconds": round(time.monotonic() - started, 2),
@@ -187,6 +207,8 @@ def _friendly_error(stderr):
     mappings = (("device busy", "Scanner is busy"), ("no documents", "The document feeder is empty"),
                 ("out of documents", "The document feeder is empty"), ("cover", "The scanner cover is open"),
                 ("access denied", "Scanner access was denied"), ("invalid argument", "The scanner rejected one or more selected options"),
+                ("plugin", "The selected scanner requires a vendor plug-in that is not installed"),
+                ("device i/o", "Scanner connection or driver initialization failed"),
                 ("i/o error", "Scanner is unreachable"), ("connection refused", "Scanner connection was refused"),
                 ("timed out", "Scanner connection timed out"))
     for needle, message in mappings:

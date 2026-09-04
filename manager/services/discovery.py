@@ -1,13 +1,16 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import ipaddress
-import re
 import socket
 import ssl
 import urllib.error
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
+from xml.sax.saxutils import escape
+
+from .scanner_drivers import ScannerDriverError, get_scanner_driver, make_hpaio_uri
 
 
 SERVICE_TYPES = ("_ipp._tcp.local.", "_ipps._tcp.local.", "_uscan._tcp.local.", "_uscans._tcp.local.")
@@ -47,7 +50,7 @@ class _Listener:
             path = props.get("rs", props.get("path", "eSCL")).lstrip("/")
             uri = f"{'https' if secure else 'http'}://{host}:{info.port}/{path}"
             endpoint_type = "scanner"
-            protocol = "escl"
+            protocol = "airscan-escl"
         else:
             path = props.get("rp", "ipp/print").lstrip("/")
             uri = f"{'ipps' if secure else 'ipp'}://{host}:{info.port}/{path}"
@@ -115,7 +118,15 @@ def _probe_host(address):
     for secure in (False, True):
         uri = _probe_escl(host, secure)
         if uri:
-            results.append({"name": f"AirScan scanner at {host}", "address": host, "uri": uri, "endpoint_type": "scanner", "protocol": "escl"})
+            results.append({"name": f"AirScan scanner at {host}", "address": host, "uri": uri, "endpoint_type": "scanner", "protocol": "airscan-escl"})
+    if any(_tcp_open(host, port) for port in (80, 443, 9100)):
+        try:
+            uri = make_hpaio_uri(host, timeout=4)
+        except ScannerDriverError:
+            pass
+        else:
+            results.append({"name": f"HP HPLIP scanner at {host}", "address": host, "uri": uri,
+                            "endpoint_type": "scanner", "protocol": "hpaio"})
     return results
 
 
@@ -126,7 +137,75 @@ def discover_lan(cidr):
         for found in pool.map(_probe_host, network.hosts()):
             results.extend(found)
     results.extend(_discover_wsd_scanners(network))
-    return results
+    return _deduplicate_results(results)
+
+
+def _local_name(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def _child_text(element, name):
+    for child in element.iter():
+        if _local_name(child.tag) == name and child.text:
+            return child.text.strip()
+    return ""
+
+
+def _endpoint_is_allowed(uri, network):
+    parsed = urlparse(uri)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+        return address.version == 4 and address in network
+    except ValueError:
+        return False
+
+
+def _wsd_metadata(xaddr, endpoint_reference, network, timeout):
+    message_id = uuid.uuid4()
+    body = f'''<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">
+<s:Header><a:Action>http://schemas.xmlsoap.org/ws/2004/09/transfer/Get</a:Action><a:MessageID>uuid:{message_id}</a:MessageID><a:To>{escape(endpoint_reference)}</a:To><a:ReplyTo><a:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address></a:ReplyTo></s:Header><s:Body/></s:Envelope>'''.encode()
+    request = urllib.request.Request(xaddr, data=body, method="POST", headers={
+        "Content-Type": "application/soap+xml; charset=utf-8",
+        "User-Agent": "PrinterManager/1.0",
+    })
+    context = ssl._create_unverified_context() if xaddr.startswith("https://") else None
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            payload = response.read(262145)
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return []
+    if len(payload) > 262144:
+        return []
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        return []
+    manufacturer = model = ""
+    for element in root.iter():
+        name = _local_name(element.tag)
+        if name == "Manufacturer" and element.text and not manufacturer:
+            manufacturer = element.text.strip()
+        elif name == "ModelName" and element.text and not model:
+            model = element.text.strip()
+    display_name = " ".join(part for part in (manufacturer, model) if part).strip()
+    endpoints = []
+    for hosted in (element for element in root.iter() if _local_name(element.tag) == "Hosted"):
+        if "ScannerServiceType" not in _child_text(hosted, "Types"):
+            continue
+        uri = _child_text(hosted, "Address")
+        if uri and _endpoint_is_allowed(uri, network):
+            parsed = urlparse(uri)
+            endpoints.append({
+                "name": display_name or f"WSD scanner at {parsed.hostname}",
+                "address": parsed.hostname,
+                "uri": uri,
+                "endpoint_type": "scanner",
+                "protocol": "airscan-wsd",
+            })
+    return endpoints
 
 
 def _discover_wsd_scanners(network, timeout=2.0):
@@ -146,20 +225,24 @@ def _discover_wsd_scanners(network, timeout=2.0):
                 payload, sender = sock.recvfrom(65535)
             except socket.timeout:
                 break
-            text = payload.decode(errors="ignore")
-            matches = re.findall(r"<(?:\w+:)?XAddrs>(.*?)</(?:\w+:)?XAddrs>", text, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                for uri in match.split():
-                    parsed = urlparse(uri)
-                    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            if len(payload) > 262144:
+                continue
+            try:
+                root = ET.fromstring(payload)
+            except ET.ParseError:
+                continue
+            for match in (element for element in root.iter() if _local_name(element.tag) == "ProbeMatch"):
+                if "ScanDeviceType" not in _child_text(match, "Types"):
+                    continue
+                endpoint_reference = _child_text(match, "Address")
+                xaddrs = _child_text(match, "XAddrs").split()
+                if not endpoint_reference:
+                    continue
+                for xaddr in xaddrs:
+                    if not _endpoint_is_allowed(xaddr, network):
                         continue
-                    try:
-                        address = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
-                    except (OSError, ValueError):
-                        continue
-                    if address in network:
-                        found[uri] = {"name": f"WSD scanner at {address}", "address": str(address), "uri": uri,
-                                      "endpoint_type": "scanner", "protocol": "wsd"}
+                    for result in _wsd_metadata(xaddr, endpoint_reference, network, timeout):
+                        found[result["uri"]] = result
     except OSError:
         return []
     finally:
@@ -167,7 +250,24 @@ def _discover_wsd_scanners(network, timeout=2.0):
     return list(found.values())
 
 
+def _deduplicate_results(results):
+    priority = {"airscan-escl": 0, "airscan-wsd": 1, "hpaio": 2}
+    selected = {}
+    for result in results:
+        if result.get("endpoint_type") != "scanner":
+            selected[(result.get("endpoint_type"), result.get("uri"))] = result
+            continue
+        key = ("scanner", result.get("address"))
+        previous = selected.get(key)
+        if previous is None or priority.get(result.get("protocol"), 99) < priority.get(previous.get("protocol"), 99):
+            selected[key] = result
+    return list(selected.values())
+
+
 def validate_endpoint_uri(uri, endpoint_type):
+    if endpoint_type == "scanner" and uri.startswith("hpaio:"):
+        get_scanner_driver("hpaio").normalize_endpoint(uri)
+        return urlparse(uri)
     parsed = urlparse(uri)
     allowed = {"ipp", "ipps"} if endpoint_type == "printer" else {"http", "https"}
     if parsed.scheme not in allowed or not parsed.hostname:

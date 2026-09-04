@@ -74,9 +74,18 @@ def handle_discovery(run_id):
         duration = AppSetting.get_int("discovery_seconds", 12, minimum=3, maximum=60)
         run.results = discover_mdns(duration) if run.kind == DiscoveryRun.Kind.MDNS else discover_lan(run.cidr)
         run.state = DiscoveryRun.State.COMPLETE
+        record("discovery.completed", actor=run.requested_by, target=run, detail={
+            "kind": run.kind, "cidr": run.cidr, "candidate_count": len(run.results),
+            "scanner_drivers": sorted({result.get("protocol") for result in run.results
+                                       if result.get("endpoint_type") == "scanner" and result.get("protocol")}),
+        })
     except Exception as exc:
         run.state = DiscoveryRun.State.FAILED
         run.error = str(exc)[:500]
+        record("discovery.failed", actor=run.requested_by, target=run, detail={
+            "kind": run.kind, "cidr": run.cidr, "exception_type": type(exc).__name__,
+            "message": str(exc)[:500],
+        })
         raise
     finally:
         run.finished_at = timezone.now()
@@ -98,18 +107,28 @@ def handle_configure_printer(printer_id):
 def handle_configure_scanner(scanner_id):
     from .models import ScannerEndpoint
     scanner = ScannerEndpoint.objects.select_related("device").get(pk=scanner_id)
-    regenerate_config()
     try:
+        regenerate_config()
         fetch_capabilities(scanner)
-        scanner.device.status = "online"
-        scanner.device.last_seen_at = timezone.now()
-        scanner.device.status_message = ""
+        scanner.validation_state = ScannerEndpoint.ValidationState.READY
+        scanner.validation_message = ""
+        scanner.validated_at = timezone.now()
+        scanner.save(update_fields=["validation_state", "validation_message", "validated_at"])
+        record("scanner.validation_succeeded", target=scanner, detail={
+            "driver": scanner.protocol, "endpoint": scanner.uri, "sane_name": scanner.sane_name,
+            "capabilities": scanner.capabilities,
+        })
     except Exception as exc:
-        scanner.device.status = "offline"
-        scanner.device.status_message = str(exc)[:255]
+        scanner.validation_state = ScannerEndpoint.ValidationState.FAILED
+        scanner.validation_message = str(exc)[:500]
+        scanner.validated_at = timezone.now()
+        scanner.save(update_fields=["validation_state", "validation_message", "validated_at"])
+        record("scanner.validation_failed", target=scanner, detail={
+            "exception_type": type(exc).__name__, "message": str(exc)[:500],
+            "driver": scanner.protocol, "endpoint": scanner.uri,
+            "diagnostics": getattr(exc, "diagnostics", {}),
+        })
         raise
-    finally:
-        scanner.device.save(update_fields=["status", "last_seen_at", "status_message", "updated_at"])
 
 
 def handle_print(print_job_id):
@@ -240,6 +259,20 @@ def handle_delete_printer_queue(queue_name):
 
 def handle_regenerate_scanners():
     regenerate_config()
+
+
+def reconcile_scanner_validations():
+    from .models import ScannerEndpoint
+    scanners = ScannerEndpoint.objects.filter(validation_state=ScannerEndpoint.ValidationState.UNKNOWN)
+    for scanner in scanners:
+        already_queued = Task.objects.filter(
+            kind="configure_scanner", state__in=[Task.State.PENDING, Task.State.RUNNING],
+            payload__scanner_id=scanner.pk,
+        ).exists()
+        if not already_queued:
+            scanner.validation_state = ScannerEndpoint.ValidationState.PENDING
+            scanner.save(update_fields=["validation_state"])
+            Task.enqueue("configure_scanner", scanner_id=scanner.pk)
 
 
 def sync_print_jobs():

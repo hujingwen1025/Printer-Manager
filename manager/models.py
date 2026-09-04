@@ -49,14 +49,24 @@ class PrinterEndpoint(models.Model):
 
 class ScannerEndpoint(models.Model):
     class Protocol(models.TextChoices):
-        ESCL = "escl", "eSCL / AirScan"
-        WSD = "wsd", "WSD"
+        AIRSCAN_ESCL = "airscan-escl", "AirScan / eSCL"
+        AIRSCAN_WSD = "airscan-wsd", "AirScan / WSD"
+        HPAIO = "hpaio", "HP HPLIP / HPAIO"
+
+    class ValidationState(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        PENDING = "pending", "Pending"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
 
     device = models.OneToOneField(Device, on_delete=models.CASCADE, related_name="scanner")
-    uri = models.URLField(max_length=500, unique=True)
-    protocol = models.CharField(max_length=8, choices=Protocol.choices, default=Protocol.ESCL)
+    uri = models.CharField(max_length=500, unique=True)
+    protocol = models.CharField(max_length=24, choices=Protocol.choices, default=Protocol.AIRSCAN_ESCL)
     sane_name = models.CharField(max_length=180, blank=True)
     capabilities = models.JSONField(default=dict, blank=True)
+    validation_state = models.CharField(max_length=12, choices=ValidationState.choices, default=ValidationState.UNKNOWN)
+    validation_message = models.CharField(max_length=500, blank=True)
+    validated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.device.name} scanner"

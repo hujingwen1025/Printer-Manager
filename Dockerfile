@@ -7,12 +7,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PM_PORT=80 \
     SANE_CONFIG_DIR=/data/app/sane
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      cups cups-client cups-filters libcups2-dev gcc python3-dev \
-      sane-utils sane-airscan \
-      libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress \
-      file libmagic1 fonts-dejavu-core supervisor tini curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
+RUN set -eu; \
+    sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Retries=5 update; \
+    install_attempt=1; \
+    until DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        cups cups-client cups-filters libcups2-dev gcc python3-dev \
+        sane-utils sane-airscan hplip libsane-hpaio \
+        libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress \
+        file libmagic1 fonts-dejavu-core supervisor tini curl ca-certificates; do \
+      if [ "$install_attempt" -ge 3 ]; then exit 1; fi; \
+      install_attempt=$((install_attempt + 1)); \
+      apt-get -o Acquire::Retries=5 update; \
+    done; \
+    rm -rf /var/lib/apt/lists/* \
     && (getent group scanner >/dev/null || groupadd --system scanner) \
     && (getent group lpadmin >/dev/null || groupadd --system lpadmin) \
     && groupadd --system printermanager \

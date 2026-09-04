@@ -74,7 +74,7 @@ There is no public registration. Administrators create and disable accounts from
 Open **Discovery** and choose one of these modes:
 
 - **AirPrint / AirScan** listens for `_ipp`, `_ipps`, `_uscan`, and `_uscans` advertisements for a short, bounded session.
-- **LAN scan** requires a private IPv4 CIDR such as `192.168.1.0/24`. It will not accept a public range, IPv6 range, or anything larger than `/24`. It probes only standard IPP and eSCL endpoints with bounded concurrency and timeouts.
+- **LAN scan** requires a private IPv4 CIDR such as `192.168.1.0/24`. It will not accept a public range, IPv6 range, or anything larger than `/24`. It probes standard IPP/eSCL endpoints, validated WSD scanner metadata, and installed vetted scanner drivers with bounded concurrency and timeouts.
 
 Nothing is added automatically. Review each result and confirm its name and endpoint. Printer Manager never starts discovery at boot or on a schedule.
 
@@ -86,9 +86,10 @@ Common examples:
 - Secure printer: `ipps://printer.example.lan/ipp/print`
 - eSCL scanner: `http://192.168.1.50/eSCL`
 - Secure eSCL scanner: `https://192.168.1.50/eSCL`
-- WSD scanner: use the HTTP device-service URL reported by its documentation or discovery result and select **WSD**.
+- Validated WSD scanner: use the hosted scanner-service URL reported by discovery and select **AirScan / WSD**.
+- HP HPLIP scanner: enter the private device IP and select **HP HPLIP / HPAIO**. Printer Manager generates the canonical `hpaio:/net/...` identifier.
 
-Endpoints must resolve to private or link-local addresses. Printer queues use CUPS' driverless `everywhere` model. Saved scanner endpoints are written to a private generated `airscan.conf`, with automatic SANE discovery disabled.
+Endpoints must resolve to private or link-local addresses. Printer queues use CUPS' driverless `everywhere` model. The private SANE configuration enables only the installed `airscan` and `hpaio` backends; only AirScan endpoints are written to `airscan.conf`, with automatic SANE discovery disabled.
 
 ## Printing
 
@@ -317,6 +318,34 @@ Select **Deploy immediately** or save and click **Deploy**. The first image buil
 In Dockhand, confirm the `PrinterManager` container becomes **healthy**. Its logs should show successful migrations, administrator creation on a new data directory, and all three supervisor programs—CUPS, web, and worker—entering the running state.
 
 Then open `http://192.168.10.167/`, sign in, and immediately change the bootstrap password under the account menu. Open **Settings** to configure timezone, retention, timeouts, retry count, and upload limits.
+
+### Reconfigure an HP M177fw scanner after this update
+
+The M177fw continues to print through its driverless IPP queue. Its scanner uses the separately selectable **HP HPLIP / HPAIO** backend. HP marks this model as requiring its proprietary plug-in, so the repository installs only Debian's open HPLIP components and leaves the licence acceptance to the administrator.
+
+1. Back up `/opt/docker/printer_manager_data`, synchronize the Git stack, and redeploy with **Build images on deploy** enabled. Keep `192.168.10.167`, port `80`, `LAN IPVSwitch`, and the existing `/data` mount unchanged.
+2. Wait for the `PrinterManager` container to become healthy, then open its Dockhand terminal as `root`.
+3. Start HP's interactive installer:
+
+   ```sh
+   hp-plugin -i
+   ```
+
+   Choose `d` to download the matching plug-in, review and accept HP's licence, and wait for `Done`.
+4. Confirm HPLIP recognizes the scanner address:
+
+   ```sh
+   hp-makeuri -s 192.168.10.21
+   ```
+
+   A usable result starts with `hpaio:/net/`. If the command reports a plug-in problem, rerun `hp-plugin -i`. If it reports that the device is unavailable, wake the MFP and verify its current IP address.
+5. Sign in to Printer Manager as an administrator. Open the existing HP device, choose **Edit**, remove the obsolete WSD scanner endpoint ending in `:3911/...UUID`, and leave the working IPP printer endpoint unchanged.
+6. Open **Discovery**, choose **LAN scan**, enter `192.168.10.0/24`, and start the explicit scan. Select the result labelled **HP HPLIP / HPAIO**, choose **Add to existing device**, and save it.
+7. Return to the device page. The scanner changes from **Pending** to **Ready** after `scanimage --all-options` succeeds. Confirm that the page shows an `hpaio:/net/...` SANE identifier and reported sources, modes, and resolutions. Use **Revalidate scanner** if the printer was asleep during the first attempt.
+8. Put one page on the glass and submit a Color, 300 DPI, PDF scan. Verify the completed job can be previewed and downloaded.
+9. If validation or scanning fails, open **Audit** and expand the newest `scanner.validation_failed` or `scan.failed` event. It includes the selected driver, endpoint, command, return code, and bounded SANE error output.
+
+The plug-in remains installed across ordinary restarts of the same container, but a Dockhand rebuild or container recreation replaces that writable image layer. Repeat `hp-plugin -i` after each rebuilt deployment. Scanner records and settings remain in `/data`.
 
 If the web page works but discovery does not, try an explicit LAN scan of `192.168.10.0/24`. Some ipvlan configurations do not pass mDNS multicast even though direct IPP/eSCL traffic works.
 

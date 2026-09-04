@@ -6,7 +6,7 @@
 <div class="progress-card" data-auto-refresh="3000"><span class="spinner"></span><div><h2>{{ run.get_state_display }}</h2><p>Listening and safely checking device endpoints. This page will refresh.</p></div></div>
 {% elif run.state == 'failed' %}<div class="message error">{{ run.error }}</div>
 {% else %}<div class="result-list">
-{% for result in results %}<article class="result-card"><div><span class="pill">{{ result.endpoint_type|title }} · {{ result.protocol|upper }}</span><h3>{{ result.name }}</h3><p>{{ result.address }}</p><code>{{ result.uri }}</code></div>
+{% for result in results %}<article class="result-card"><div><span class="pill">{{ result.endpoint_type|title }} · {{ result.driver_label|default:result.protocol }}</span><h3>{{ result.name }}</h3><p>{{ result.address }}</p><code>{{ result.uri }}</code></div>
 {% if result.existing_device_id %}
   {% if result.endpoint_type == 'printer' %}<a class="button primary" href="{% url 'device_edit' result.existing_device_id %}?printer_uri={{ result.uri|urlencode }}">Add to existing device</a>{% else %}<a class="button primary" href="{% url 'device_edit' result.existing_device_id %}?scanner_uri={{ result.uri|urlencode }}&scanner_protocol={{ result.protocol|urlencode }}">Add to existing device</a>{% endif %}
 {% elif result.endpoint_type == 'printer' %}<a class="button primary" href="{% url 'device_create' %}?name={{ result.name|urlencode }}&address={{ result.address|urlencode }}&printer_uri={{ result.uri|urlencode }}">Review and add</a>

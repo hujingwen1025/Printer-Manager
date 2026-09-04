@@ -23,6 +23,7 @@ from .forms import (DeviceForm, DiscoveryForm, ManagedUserEditForm, ManagedUserF
 from .models import AppSetting, AuditEvent, Device, DiscoveryRun, PrinterEndpoint, PrintJob, ScanJob, ScannerEndpoint, Task, print_expiration, scan_expiration
 from .security import ROLE_ADMIN, ROLE_OPERATOR, admin_required, has_role, operator_required
 from .services.documents import inspect_document
+from .services.scanner_drivers import get_scanner_driver
 
 
 @login_required
@@ -63,7 +64,7 @@ def device_create(request):
     if request.method == "POST" and form.is_valid():
         with transaction.atomic():
             device = form.save()
-            _save_endpoints(device, form.cleaned_data)
+            _save_endpoints(device, form.cleaned_data, force_scanner_validation=True)
         record("device.created", request=request, target=device)
         messages.success(request, "Device saved. Validation is running in the background.")
         return redirect("device_detail", pk=device.pk)
@@ -73,19 +74,26 @@ def device_create(request):
 @admin_required
 def device_edit(request, pk):
     device = get_object_or_404(Device, pk=pk)
+    previous_scanner = ScannerEndpoint.objects.filter(device=device).values("protocol", "uri").first()
     initial = {key: request.GET.get(key) for key in ("printer_uri", "scanner_uri", "scanner_protocol") if request.GET.get(key)}
     form = DeviceForm(request.POST or None, instance=device, initial=initial)
     if request.method == "POST" and form.is_valid():
         with transaction.atomic():
             device = form.save()
-            _save_endpoints(device, form.cleaned_data)
+            _save_endpoints(device, form.cleaned_data, force_scanner_validation="address" in form.changed_data)
         record("device.updated", request=request, target=device)
+        current_scanner = ScannerEndpoint.objects.filter(device=device).first()
+        if previous_scanner and current_scanner and previous_scanner["protocol"] != current_scanner.protocol:
+            record("scanner.driver_changed", request=request, target=current_scanner, detail={
+                "previous_driver": previous_scanner["protocol"], "new_driver": current_scanner.protocol,
+                "previous_endpoint": previous_scanner["uri"], "new_endpoint": current_scanner.uri,
+            })
         messages.success(request, "Device updated and queued for revalidation.")
         return redirect("device_detail", pk=device.pk)
     return render(request, "manager/form_page.html", {"form": form, "title": "Edit device", "submit_label": "Save changes"})
 
 
-def _save_endpoints(device, data):
+def _save_endpoints(device, data, force_scanner_validation=False):
     if data.get("printer_uri"):
         previous = PrinterEndpoint.objects.filter(device=device).first()
         old_queue = previous.queue_name if previous else ""
@@ -96,8 +104,17 @@ def _save_endpoints(device, data):
     elif hasattr(device, "printer"):
         device.printer.delete()
     if data.get("scanner_uri"):
-        scanner, _ = ScannerEndpoint.objects.update_or_create(device=device, defaults={"uri": data["scanner_uri"], "protocol": data.get("scanner_protocol") or "escl"})
-        Task.enqueue("configure_scanner", scanner_id=scanner.pk)
+        previous = ScannerEndpoint.objects.filter(device=device).first()
+        driver_id = data.get("scanner_protocol") or ScannerEndpoint.Protocol.AIRSCAN_ESCL
+        changed = force_scanner_validation or previous is None or previous.uri != data["scanner_uri"] or previous.protocol != driver_id
+        defaults = {"uri": data["scanner_uri"], "protocol": driver_id}
+        if changed:
+            defaults.update({"sane_name": "", "capabilities": {},
+                             "validation_state": ScannerEndpoint.ValidationState.PENDING,
+                             "validation_message": "", "validated_at": None})
+        scanner, _ = ScannerEndpoint.objects.update_or_create(device=device, defaults=defaults)
+        if changed:
+            Task.enqueue("configure_scanner", scanner_id=scanner.pk)
     elif hasattr(device, "scanner"):
         device.scanner.delete()
 
@@ -135,7 +152,15 @@ def discovery(request):
 def discovery_detail(request, pk):
     run = get_object_or_404(DiscoveryRun, pk=pk)
     known = {device.address: str(device.pk) for device in Device.objects.all()}
-    results = [{**result, "existing_device_id": known.get(result.get("address"))} for result in run.results]
+    results = []
+    for result in run.results:
+        item = {**result, "existing_device_id": known.get(result.get("address"))}
+        if result.get("endpoint_type") == "scanner":
+            try:
+                item["driver_label"] = get_scanner_driver(result.get("protocol", "")).label
+            except ValueError:
+                item["driver_label"] = result.get("protocol", "Unknown driver")
+        results.append(item)
     return render(request, "manager/discovery_detail.html", {"run": run, "results": results})
 
 
@@ -172,18 +197,36 @@ def print_submit(request, printer_id):
 @operator_required
 def scan_submit(request, scanner_id):
     scanner = get_object_or_404(ScannerEndpoint.objects.select_related("device"), pk=scanner_id, device__enabled=True)
+    if scanner.validation_state != ScannerEndpoint.ValidationState.READY:
+        messages.error(request, "This scanner is not ready. Ask an administrator to validate its driver and endpoint.")
+        return redirect("device_detail", pk=scanner.device_id)
     form = ScanJobForm(request.POST or None, scanner=scanner)
     if request.method == "POST" and form.is_valid():
         job = ScanJob.objects.create(owner=request.user, scanner=scanner, title=form.cleaned_data["title"] or f"Scan {timezone.localtime():%Y-%m-%d %H:%M}",
                                      options=form.options(), output_format=form.cleaned_data["output_format"], artifact_expires_at=scan_expiration())
         Task.enqueue("scan", scan_job_id=str(job.id))
         record("scan.submitted", request=request, target=job, detail={
-            "scanner": scanner.device.name, "scanner_uri": scanner.uri, "protocol": scanner.protocol,
+            "scanner": scanner.device.name, "scanner_uri": scanner.uri, "driver": scanner.protocol,
             "options": job.options, "output_format": job.output_format,
         })
         messages.success(request, "Scan job queued. Load the scanner now if needed.")
         return redirect("jobs")
     return render(request, "manager/scan_submit.html", {"form": form, "scanner": scanner})
+
+
+@admin_required
+@require_POST
+def scanner_revalidate(request, pk):
+    scanner = get_object_or_404(ScannerEndpoint, pk=pk)
+    scanner.validation_state = ScannerEndpoint.ValidationState.PENDING
+    scanner.validation_message = ""
+    scanner.validated_at = None
+    scanner.save(update_fields=["validation_state", "validation_message", "validated_at"])
+    Task.enqueue("configure_scanner", scanner_id=scanner.pk)
+    record("scanner.revalidation_requested", request=request, target=scanner,
+           detail={"driver": scanner.protocol, "endpoint": scanner.uri})
+    messages.success(request, "Scanner validation queued.")
+    return redirect("device_detail", pk=scanner.device_id)
 
 
 @login_required

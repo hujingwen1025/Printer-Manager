@@ -16,6 +16,7 @@ urlpatterns = [
     path("printers/<int:pk>/command/<str:command>/", views.printer_command, name="printer_command"),
     path("printers/<int:pk>/defaults/", views.printer_defaults, name="printer_defaults"),
     path("scanners/<int:scanner_id>/scan/", views.scan_submit, name="scan_submit"),
+    path("scanners/<int:pk>/revalidate/", views.scanner_revalidate, name="scanner_revalidate"),
     path("jobs/", views.jobs, name="jobs"),
     path("jobs/print/<uuid:pk>/<str:command>/", views.print_job_command, name="print_job_command"),
     path("jobs/scan/<uuid:pk>/cancel/", views.scan_job_cancel, name="scan_job_cancel"),
