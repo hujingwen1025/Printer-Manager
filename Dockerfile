@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PM_DATA_DIR=/data/app \
     PM_CUPS_SERVER=/run/cups/cups.sock \
-    PM_PORT=8080 \
+    PM_PORT=80 \
     SANE_CONFIG_DIR=/data/app/sane
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -28,6 +28,6 @@ RUN chmod +x /app/docker/entrypoint.sh \
     && chown -R printermanager:printermanager /data/app \
     && python manage.py collectstatic --noinput
 
-EXPOSE 8080
+EXPOSE 80
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker/entrypoint.sh"]
 CMD ["/usr/bin/supervisord", "-c", "/app/docker/supervisord.conf"]

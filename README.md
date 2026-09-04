@@ -50,7 +50,7 @@ Docker Desktop is not the primary target. Multicast and WSD behavior can differ 
    docker compose up -d --build
    ```
 
-5. Open `http://192.168.10.167:8080/` and sign in with `PM_ADMIN_USERNAME` and `PM_ADMIN_PASSWORD`.
+5. Open `http://192.168.10.167/` and sign in with `PM_ADMIN_USERNAME` and `PM_ADMIN_PASSWORD`.
 
 The bootstrap password is used only when the first administrator is created. Later environment changes do not reset the account. Use **Users → Reset password** or **Account → Change password** in the interface. File-based secrets remain supported through `PM_ADMIN_PASSWORD_FILE` and `PM_SECRET_KEY_FILE` for deployments that manage Docker secrets outside Dockhand.
 
@@ -125,7 +125,7 @@ Example Caddy configuration (when the proxy can reach the LAN address):
 
 ```caddyfile
 print.example.lan {
-    reverse_proxy 192.168.10.167:8080
+    reverse_proxy 192.168.10.167:80
 }
 ```
 
@@ -133,7 +133,7 @@ Example Nginx location:
 
 ```nginx
 location / {
-    proxy_pass http://192.168.10.167:8080;
+    proxy_pass http://192.168.10.167:80;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -144,7 +144,7 @@ Only enable `PM_TRUST_PROXY` when requests cannot bypass that trusted proxy. The
 
 ## Firewall and network notes
 
-Allow TCP 8080 to `192.168.10.167` only from management clients or the reverse proxy. Discovery and device operation can require outbound or multicast access to:
+Allow TCP 80 to `192.168.10.167` only from management clients or the reverse proxy. Discovery and device operation can require outbound or multicast access to:
 
 - UDP 5353 for mDNS/DNS-SD.
 - UDP 3702 for WSD discovery and device coordination.
@@ -189,7 +189,7 @@ Database migrations and static asset collection run automatically before service
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| `PM_PORT` | `8080` | Web interface port on the container's LAN address. |
+| `PM_PORT` | `80` | Web interface port on the container's LAN address. |
 | `PM_ALLOWED_HOSTS` | local only | Hostnames and addresses accepted by Django. |
 | `PM_CSRF_TRUSTED_ORIGINS` | empty | HTTPS origins accepted for form submissions. |
 | `PM_ADMIN_USERNAME` | `admin` | Username used only when bootstrapping the first administrator. |
@@ -223,7 +223,7 @@ The included `compose.yaml` is configured for this deployment:
 - Context directory: `.`
 - External network: `LAN IPVSwitch`
 - Static address: `192.168.10.167`
-- Web address: `http://192.168.10.167:8080/`
+- Web address: `http://192.168.10.167/`
 - Persistent host data: `/opt/docker/printer_manager_data`
 
 ### 1. Prepare the Docker host
@@ -297,7 +297,7 @@ openssl rand -base64 48
 
 Use the first output as `PM_ADMIN_PASSWORD` and the second as `PM_SECRET_KEY`. Dockhand supports marking values with the key icon so they are encrypted and masked. Its manual notes that injected secret variables may require a Dockhand redeploy after a Docker-host restart, so either configure a post-reboot redeploy or manage these two values as protected regular variables with tightly controlled access to Dockhand's data. Back up Dockhand's database and encryption key as well as Printer Manager data. See [Dockhand environment variables and secrets](https://dockhand.pro/manual/#secrets).
 
-For HTTPS behind a reverse proxy, set `PM_ALLOWED_HOSTS` to include the public hostname, set `PM_CSRF_TRUSTED_ORIGINS` to the full `https://` origin, and change all three HTTPS/proxy switches to `1`. The proxy target is `192.168.10.167:8080`.
+For HTTPS behind a reverse proxy, set `PM_ALLOWED_HOSTS` to include the public hostname, set `PM_CSRF_TRUSTED_ORIGINS` to the full `https://` origin, and change all three HTTPS/proxy switches to `1`. The proxy target is `192.168.10.167:80`.
 
 ### 5. Validate and deploy
 
@@ -313,7 +313,7 @@ Select **Deploy immediately** or save and click **Deploy**. The first image buil
 
 In Dockhand, confirm the `PrinterManager` container becomes **healthy**. Its logs should show successful migrations, administrator creation on a new data directory, and all three supervisor programs—CUPS, web, and worker—entering the running state.
 
-Then open `http://192.168.10.167:8080/`, sign in, and immediately change the bootstrap password under the account menu. Open **Settings** to configure timezone, retention, timeouts, retry count, and upload limits.
+Then open `http://192.168.10.167/`, sign in, and immediately change the bootstrap password under the account menu. Open **Settings** to configure timezone, retention, timeouts, retry count, and upload limits.
 
 If the web page works but discovery does not, try an explicit LAN scan of `192.168.10.0/24`. Some ipvlan configurations do not pass mDNS multicast even though direct IPP/eSCL traffic works.
 
