@@ -14,6 +14,7 @@ Printer Manager is a self-contained web appliance for operating driverless netwo
 - Printer status, capability refresh, test pages, queue enable/disable, job acceptance/rejection, defaults, and print-job controls.
 - Admin, operator, and viewer accounts with owner-scoped document access.
 - Auditing, login throttling, retention cleanup, restart-safe background tasks, and reverse-proxy HTTPS support.
+- Expandable audit diagnostics with request context, target snapshots, and detailed scan-command outcomes.
 
 Legacy PPD drivers, JetDirect, LPD, SMB, USB devices, OCR, vendor maintenance commands, and authenticated printer endpoints are intentionally outside v1.
 
@@ -348,6 +349,7 @@ After the first verified deployment, automatic Git synchronization can be enable
 - Check the generated list with `docker compose exec printer-manager scanimage -L`.
 - Check detailed capabilities with `docker compose exec printer-manager scanimage -d 'DEVICE_ID' --all-options`.
 - Use the stable manual endpoint when a device's multicast identity changes.
+- Open **Audit**, find the newest `scan.failed` event, and click **Expand**. The event records the failure stage, SANE device, command arguments, return code, bounded stdout/stderr, selected options, duration, and pages received.
 
 ### The container reports `Permission denied: /data/app`
 

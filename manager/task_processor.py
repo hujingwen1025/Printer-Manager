@@ -147,23 +147,35 @@ def handle_scan(scan_job_id):
     job.state = ScanJob.State.SCANNING
     job.error = ""
     job.save(update_fields=["state", "error", "updated_at"])
+    started = time.monotonic()
+    record("scan.started", target=job, detail={"scanner": job.scanner.device.name})
     try:
-        result, pages = run_scan(job)
+        result, pages, diagnostics = run_scan(job)
         job.result_path = str(result)
         job.page_count = pages
         job.state = ScanJob.State.COMPLETE
         job.completed_at = timezone.now()
         job.save(update_fields=["result_path", "page_count", "state", "completed_at", "updated_at"])
+        record("scan.completed", target=job, detail=diagnostics)
     except InterruptedError as exc:
         job.state = ScanJob.State.CANCELLED
         job.error = str(exc)[:500]
         job.completed_at = timezone.now()
         job.save(update_fields=["state", "error", "completed_at", "updated_at"])
+        record("scan.cancelled", target=job, detail={
+            "exception_type": type(exc).__name__, "diagnostics": getattr(exc, "diagnostics", {}),
+            "duration_seconds": round(time.monotonic() - started, 2),
+        })
     except Exception as exc:
         job.state = ScanJob.State.FAILED
         job.error = str(exc)[:500]
         job.completed_at = timezone.now()
         job.save(update_fields=["state", "error", "completed_at", "updated_at"])
+        record("scan.failed", target=job, detail={
+            "exception_type": type(exc).__name__, "message": str(exc)[:500],
+            "diagnostics": getattr(exc, "diagnostics", {}),
+            "duration_seconds": round(time.monotonic() - started, 2),
+        })
         raise
 
 

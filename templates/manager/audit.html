@@ -1,3 +1,18 @@
 {% extends "base.html" %}
+{% load manager_extras %}
 {% block title %}Audit log · Printer Manager{% endblock %}
-{% block content %}<div class="page-heading"><div><p class="eyebrow">Security</p><h1>Audit log</h1><p>The latest 500 authentication, device, user, and job actions.</p></div></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Address</th><th>Detail</th></tr></thead><tbody>{% for event in events %}<tr><td>{{ event.created_at }}</td><td>{{ event.actor.username|default:"System" }}</td><td><code>{{ event.action }}</code></td><td>{{ event.target_type }} {{ event.target_id|truncatechars:12 }}</td><td>{{ event.ip_address|default:"—" }}</td><td><small>{{ event.detail }}</small></td></tr>{% empty %}<tr><td colspan="6" class="empty-cell">No audit events.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Security and diagnostics</p><h1>Audit log</h1><p>The latest 500 authentication, device, user, job, and background processing events.</p></div></div>
+<div class="table-wrap"><table class="audit-table"><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Address</th><th>Details</th></tr></thead><tbody>
+{% for event in events %}
+<tr>
+  <td>{{ event.created_at }}</td>
+  <td>{{ event.actor.username|default:"System" }}</td>
+  <td><code>{{ event.action }}</code></td>
+  <td>{{ event.target_type }}{% if event.target_id %}<small>{{ event.target_id }}</small>{% endif %}</td>
+  <td>{{ event.ip_address|default:"—" }}</td>
+  <td><details class="audit-details"><summary>Expand</summary><div class="audit-detail-grid"><div><strong>Event ID</strong><code>{{ event.pk }}</code></div><div><strong>Recorded</strong><span>{{ event.created_at|date:"c" }}</span></div><div><strong>Actor</strong><span>{{ event.actor.username|default:"System process" }}</span></div><div><strong>Target</strong><span>{{ event.target_type|default:"—" }} {{ event.target_id|default:"" }}</span></div></div><pre>{{ event.detail|pretty_json }}</pre></details></td>
+</tr>
+{% empty %}<tr><td colspan="6" class="empty-cell">No audit events.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

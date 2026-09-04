@@ -6,12 +6,15 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import Group, User
 from django.core.management import call_command
+from django.test import RequestFactory
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from manager.models import AppSetting, Device, DiscoveryRun, PrinterEndpoint, PrintJob, ScanJob, ScannerEndpoint, Task
-from manager.task_processor import handle_print
+from manager.audit import record
+from manager.models import AppSetting, AuditEvent, Device, DiscoveryRun, PrinterEndpoint, PrintJob, ScanJob, ScannerEndpoint, Task
+from manager.services.sane_service import ScanFailure
+from manager.task_processor import handle_print, handle_scan
 from manager.security import ROLES
 
 
@@ -217,3 +220,35 @@ class BootstrapTests(TestCase):
         user = User.objects.get(username="dockhand-admin")
         self.assertTrue(user.check_password("a-secure-dockhand-password"))
         self.assertTrue(user.groups.filter(name="admin").exists())
+
+
+class AuditDetailTests(BaseCase):
+    def test_audit_event_captures_request_target_and_redacts_secrets(self):
+        request = RequestFactory().post("/scanners/1/scan/", HTTP_USER_AGENT="Audit test browser")
+        request.user = self.operator
+        event = record("scan.test", request=request, target=self.scanner,
+                       detail={"options": {"resolution": "300"}, "api_token": "must-not-appear"})
+        self.assertEqual(event.detail["request"]["method"], "POST")
+        self.assertEqual(event.detail["target"]["device"]["name"], "Office MFP")
+        self.assertEqual(event.detail["event"]["api_token"], "[redacted]")
+
+    def test_audit_page_has_expandable_pretty_details(self):
+        record("scan.test", actor=self.operator, target=self.scanner, detail={"stage": "diagnostic"})
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("audit"))
+        self.assertContains(response, "<details", html=False)
+        self.assertContains(response, "diagnostic")
+
+    def test_scan_failure_records_sane_diagnostics(self):
+        job = ScanJob.objects.create(owner=self.operator, scanner=self.scanner, title="Broken scan",
+                                     options={"resolution": "300"}, output_format="pdf",
+                                     artifact_expires_at="2030-01-01T00:00:00Z")
+        diagnostics = {"stage": "scanimage", "return_code": 1, "stderr": "Invalid argument", "command": ["scanimage"]}
+        with patch("manager.task_processor.run_scan", side_effect=ScanFailure("The scanner rejected one or more selected options", diagnostics)):
+            with self.assertRaises(ScanFailure):
+                handle_scan(str(job.pk))
+        job.refresh_from_db()
+        self.assertEqual(job.state, "failed")
+        event = AuditEvent.objects.get(action="scan.failed")
+        self.assertEqual(event.detail["event"]["diagnostics"]["return_code"], 1)
+        self.assertEqual(event.detail["target"]["options"]["resolution"], "300")

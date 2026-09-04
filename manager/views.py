@@ -177,7 +177,10 @@ def scan_submit(request, scanner_id):
         job = ScanJob.objects.create(owner=request.user, scanner=scanner, title=form.cleaned_data["title"] or f"Scan {timezone.localtime():%Y-%m-%d %H:%M}",
                                      options=form.options(), output_format=form.cleaned_data["output_format"], artifact_expires_at=scan_expiration())
         Task.enqueue("scan", scan_job_id=str(job.id))
-        record("scan.submitted", request=request, target=job, detail={"scanner": scanner.device.name})
+        record("scan.submitted", request=request, target=job, detail={
+            "scanner": scanner.device.name, "scanner_uri": scanner.uri, "protocol": scanner.protocol,
+            "options": job.options, "output_format": job.output_format,
+        })
         messages.success(request, "Scan job queued. Load the scanner now if needed.")
         return redirect("jobs")
     return render(request, "manager/scan_submit.html", {"form": form, "scanner": scanner})
